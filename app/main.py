@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import (
     FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
 )
@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import Settings
 from .csvparse import BatchRejected, ParseError
+from .diff import CompareError
 from .service import AppService, ConflictError, format_utc
 from .worker import ReportWorker
 
@@ -54,6 +55,10 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     @app.exception_handler(ParseError)
     async def _parse_error(_: Request, exc: ParseError):
         return JSONResponse(status_code=400, content=exc.payload())
+
+    @app.exception_handler(CompareError)
+    async def _compare_error(_: Request, exc: CompareError):
+        return JSONResponse(status_code=exc.status, content=exc.payload())
 
     # ------------------------------------------------------------------ #
     # HTML pages
@@ -97,6 +102,35 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
             headers={"Cache-Control": "no-store",
                      "X-Content-SHA256": _digest},
         )
+
+    # ------------------------------------------------------------------ #
+    # Report comparison (late-revision impact)
+    # ------------------------------------------------------------------ #
+    @app.get("/compare", response_class=HTMLResponse)
+    def compare_page(request: Request):
+        base_id = request.query_params.get("base", "")
+        candidate_id = request.query_params.get("candidate", "")
+        result = None
+        compare_error = None
+        if "base" in request.query_params or "candidate" in request.query_params:
+            try:
+                result = service.compare_reports(base_id, candidate_id)
+            except CompareError as exc:
+                compare_error = exc.message
+        return TEMPLATES.TemplateResponse(request, "compare.html", {
+            "request": request,
+            "ready_reports": service.list_ready_reports(),
+            "selected_base": base_id,
+            "selected_candidate": candidate_id,
+            "result": result,
+            "compare_error": compare_error,
+        })
+
+    @app.post("/compare")
+    def compare_form(base_id: str = Form(""), candidate_id: str = Form("")):
+        return RedirectResponse(
+            f"/compare?base={quote(base_id)}&candidate={quote(candidate_id)}",
+            status_code=303)
 
     # ------------------------------------------------------------------ #
     # Form actions (browser)
@@ -172,6 +206,10 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     def api_reports():
         return {"reports": service.list_reports()}
 
+    @app.get("/api/reports/ready")
+    def api_ready_reports():
+        return {"reports": service.list_ready_reports()}
+
     @app.get("/api/reports/{public_id}")
     def api_report(public_id: str):
         report = service.get_report(public_id)
@@ -193,6 +231,10 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
         except ConflictError as exc:
             return JSONResponse(status_code=409,
                                 content={"error": "conflict", "message": exc.message})
+
+    @app.get("/api/compare")
+    def api_compare(base: str, candidate: str):
+        return service.compare_reports(base, candidate)
 
     @app.get("/healthz", response_class=PlainTextResponse)
     def healthz():

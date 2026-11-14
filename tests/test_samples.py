@@ -86,6 +86,63 @@ class SampleFixtureTest(unittest.TestCase):
                 (SAMPLES / "transactions_conflict_rejected.csv").read_bytes())
         self.assertEqual(getattr(ctx.exception, "code", None), "batch_rejected")
 
+    def test_compare_demo_offset_and_cancel(self):
+        """Shipped compare fixtures reproduce offset vs cancel semantics."""
+        self.svc.upload_transactions(
+            "compare_demo_base.csv",
+            (SAMPLES / "compare_demo_base.csv").read_bytes())
+        self.svc.upload_samples(
+            "compare_demo_samples.csv",
+            (SAMPLES / "compare_demo_samples.csv").read_bytes())
+        old = self.svc.create_report()["report_id"]
+        self.svc.claim_next_report()
+        self.svc.run_report(old)
+
+        # Same-value retransmit is idempotent and adds no revisions.
+        again = self.svc.upload_transactions(
+            "compare_demo_base.csv",
+            (SAMPLES / "compare_demo_base.csv").read_bytes())
+        self.assertEqual(again["stored_rows"], 0)
+        self.assertEqual(again["skipped_same_value"], 8)
+
+        self.svc.upload_transactions(
+            "compare_demo_late.csv",
+            (SAMPLES / "compare_demo_late.csv").read_bytes())
+        new = self.svc.create_report()["report_id"]
+        self.svc.claim_next_report()
+        self.svc.run_report(new)
+
+        result = self.svc.compare_reports(old, new)
+        affected = {s["sample_id"]: s for s in result["affected_samples"]}
+        offset = {s["sample_id"]: s for s in result["event_only_samples"]}
+
+        self.assertEqual(set(affected), {"SC-D", "SC-E"})
+        self.assertEqual(set(offset), {"SC-G"})
+        self.assertEqual(result["unchanged_count"], 1)
+
+        # SC-D: amount unchanged but count dropped -> still affected.
+        self.assertEqual(affected["SC-D"]["base"]["txn_amount_7d"], "140.00")
+        self.assertEqual(affected["SC-D"]["candidate"]["txn_amount_7d"], "140.00")
+        self.assertEqual(affected["SC-D"]["base"]["txn_count_7d"], "2")
+        self.assertEqual(affected["SC-D"]["candidate"]["txn_count_7d"], "1")
+
+        # SC-E: cancellation removes the only event.
+        self.assertEqual(affected["SC-E"]["candidate"]["txn_count_7d"], "0")
+        cancel_event = affected["SC-E"]["events"][0]
+        self.assertEqual(cancel_event["event_id"], "E1")
+        self.assertEqual(cancel_event["change_label"], "最新修订为撤销，事件移出")
+        self.assertEqual(cancel_event["candidate"]["winner"]["filename"],
+                         "compare_demo_late.csv")
+
+        # SC-G: cancel (-1/-30) offsets move-into-window (+1/+30); not affected.
+        g = offset["SC-G"]
+        self.assertEqual(g["base"]["txn_count_7d"], "3")
+        self.assertEqual(g["candidate"]["txn_count_7d"], "3")
+        self.assertEqual(g["candidate"]["txn_amount_7d"], "90.00")
+        self.assertEqual(g["delta"]["count"], 0)
+        self.assertEqual(g["delta"]["amount_text"], "0.00")
+        self.assertEqual({e["event_id"] for e in g["events"]}, {"G3", "G4"})
+
 
 if __name__ == "__main__":
     unittest.main()

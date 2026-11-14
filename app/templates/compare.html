@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block title %}报告对比 · 迟到修订影响{% endblock %}
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h2 style="margin:0">两份报告特征对比</h2>
+    <div class="sticky-note">仅允许对比<strong>样本批次相同</strong>的两份就绪报告；对比值直接取自两份已发布 CSV，并与各自冻结版本重算结果核对。</div>
+  </div>
+  <div class="spacer"></div>
+  <a href="/"><button type="button" class="secondary">返回首页</button></a>
+</div>
+
+{% if compare_error %}
+<div class="banner error">对比被拒绝：{{ compare_error }}</div>
+{% endif %}
+
+<section class="card">
+  <h2>选择报告（旧 → 新）</h2>
+  {% if ready_reports %}
+  <form method="post" action="/compare" class="compare-form">
+    <label>旧报告
+      <select name="base_id" required>
+        <option value="" disabled {% if not selected_base %}selected{% endif %}>选择旧报告…</option>
+        {% for r in ready_reports %}
+        <option value="{{ r.report_id }}" {% if selected_base == r.report_id %}selected{% endif %}>
+          {{ r.report_id[:12] }} · 样本批次≤#{{ r.sample_batch_hi }} · 交易批次≤#{{ r.txn_batch_hi }} · {{ r.created_at | ts }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>新报告
+      <select name="candidate_id" required>
+        <option value="" disabled {% if not selected_candidate %}selected{% endif %}>选择新报告…</option>
+        {% for r in ready_reports %}
+        <option value="{{ r.report_id }}" {% if selected_candidate == r.report_id %}selected{% endif %}>
+          {{ r.report_id[:12] }} · 样本批次≤#{{ r.sample_batch_hi }} · 交易批次≤#{{ r.txn_batch_hi }} · {{ r.created_at | ts }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">对比特征</button>
+  </form>
+  <p class="sticky-note" style="margin-bottom:0">
+    下拉项标注每份报告冻结的高水位；选择顺序可自行交换。对比期间新上传的批次编号高于两份冻结水位，不会进入对比。
+  </p>
+  {% else %}
+    <p class="empty">当前没有状态为 ready 的报告，请先在首页生成至少两份报告。</p>
+  {% endif %}
+</section>
+
+{% if result %}
+<section class="card" style="margin-top:18px">
+  <h2>对比结论</h2>
+  <div class="summary-grid">
+    <div><span class="big">{{ result.sample_count }}</span><span class="cap">样本总数</span></div>
+    <div class="bad-num"><span class="big">{{ result.affected_count }}</span><span class="cap">特征变化样本（需重训）</span></div>
+    <div class="warn-num"><span class="big">{{ result.event_only_change_count }}</span><span class="cap">事件有变但特征抵消</span></div>
+    <div><span class="big">{{ result.unchanged_count }}</span><span class="cap">完全无变化</span></div>
+  </div>
+  <table style="margin-top:14px">
+    <thead><tr><th>版本</th><th>报告</th><th class="num">交易批次高水位</th>
+      <th class="num">样本批次高水位</th><th>创建时间 (UTC)</th><th>发布文件 SHA-256</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>旧报告</td>
+        <td class="mono"><a href="/reports/{{ result.base.report_id }}">{{ result.base.report_id[:12] }}</a></td>
+        <td class="num">#{{ result.base.txn_batch_hi }}</td>
+        <td class="num">#{{ result.base.sample_batch_hi }}</td>
+        <td class="nw">{{ result.base.created_at | ts }}</td>
+        <td class="mono">{{ result.base.output_sha256_verified[:20] }}…</td>
+      </tr>
+      <tr>
+        <td>新报告</td>
+        <td class="mono"><a href="/reports/{{ result.candidate.report_id }}">{{ result.candidate.report_id[:12] }}</a></td>
+        <td class="num">#{{ result.candidate.txn_batch_hi }}</td>
+        <td class="num">#{{ result.candidate.sample_batch_hi }}</td>
+        <td class="nw">{{ result.candidate.created_at | ts }}</td>
+        <td class="mono">{{ result.candidate.output_sha256_verified[:20] }}…</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="sticky-note" style="margin-bottom:0">
+    两份报告冻结的样本批次一致（高水位 #{{ result.base.sample_batch_hi }}）；
+    撤销与「改到窗口外」均按各自冻结版本独立计算。
+  </p>
+</section>
+
+{% macro sample_block(s, tone) %}
+<div class="sample-block {{ tone }}">
+  <div class="sample-head">
+    <h3 class="mono" style="margin:0">{{ s.sample_id }}</h3>
+    <span class="muted">账户 {{ s.account_id }} · 审核 {{ s.audit_at | ts }}</span>
+    {% if tone == 'affected' %}
+    <span class="pill ready">需重训</span>
+    {% else %}
+    <span class="pill pending">特征未变</span>
+    {% endif %}
+  </div>
+  <table class="feature-table">
+    <thead><tr><th>特征</th><th class="num">旧报告</th><th class="num">新报告</th><th class="num">差值（新−旧）</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>七天笔数 <code>txn_count_7d</code></td>
+        <td class="num">{{ s.base.txn_count_7d }}</td>
+        <td class="num">{{ s.candidate.txn_count_7d }}</td>
+        <td class="num delta">{{ s.delta.count }}</td>
+      </tr>
+      <tr>
+        <td>七天金额 <code>txn_amount_7d</code></td>
+        <td class="num">{{ s.base.txn_amount_7d }}</td>
+        <td class="num">{{ s.candidate.txn_amount_7d }}</td>
+        <td class="num delta">{{ s.delta.amount_text }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h4 class="events-title">造成差值的事件（{{ s.events | length }} 个）</h4>
+  {% for e in s.events %}
+  <details class="event-detail" {% if loop.first and tone == 'affected' %}open{% endif %}>
+    <summary>
+      <span class="mono event-id">{{ e.event_id }}</span>
+      <span class="pill change">{{ e.change_label }}</span>
+      <span class="muted small">旧 {{ e.base.amount_text if e.base.counted else '不计入' }}
+        → 新 {{ e.candidate.amount_text if e.candidate.counted else '不计入' }}</span>
+    </summary>
+    <div class="side-grid">
+      {% for side_name, side in [('旧报告可见修订', e.base), ('新报告可见修订', e.candidate)] %}
+      <div class="side-card">
+        <h5>{{ side_name }}
+          {% if side.winner %}<span class="muted small">入选修订来自批次 #{{ side.winner.batch_id }}（{{ side.winner.filename }}）</span>{% else %}<span class="muted small">该版本无可见修订</span>{% endif %}
+        </h5>
+        {% if side.visible_revisions %}
+        <table class="rev-table">
+          <thead><tr><th>交易批次</th><th class="num">入库时刻</th><th class="num">发生时刻</th>
+            <th class="num">金额</th><th>动作</th><th>角色</th></tr></thead>
+          <tbody>
+          {% for rev in side.visible_revisions %}
+            <tr class="{% if rev.counted %}counted{% elif rev.is_winner %}winner-uncounted{% endif %}">
+              <td class="num">#{{ rev.batch_id }}<div class="muted small">{{ rev.filename }}</div></td>
+              <td class="num nw">{{ rev.ingested_at | ts }}</td>
+              <td class="num nw">{{ rev.occurred_at | ts }}</td>
+              <td class="num">{{ rev.amount_text }}</td>
+              <td>{{ '撤销' if rev.action == 'cancel' else '更新' }}</td>
+              <td>
+                {% if rev.counted %}<span class="pill ready">入选且计入</span>
+                {% elif rev.is_winner %}<span class="pill failed">入选但不计入</span>
+                {% else %}<span class="muted small">被更新修订取代</span>{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="empty small" style="margin:6px 0">无 <code>ingested_at ≤ 审核时刻</code> 且属于该冻结版本的修订。</p>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{% if result.affected_samples %}
+<section class="card" style="margin-top:18px">
+  <h2>① 特征发生变化的样本（{{ result.affected_count }} 个，纳入重训范围）</h2>
+  {% for s in result.affected_samples %}
+    {{ sample_block(s, 'affected') }}
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if result.event_only_samples %}
+<section class="card" style="margin-top:18px">
+  <h2>② 事件有变化但七天笔数/金额相互抵消的样本（{{ result.event_only_change_count }} 个，不列入受影响）</h2>
+  <p class="hint">下列样本存在真实的事件级修订差异，但笔数与金额的净差值均为 0，因此不视为特征变化、无需重训；差异明细仍完整可查。</p>
+  {% for s in result.event_only_samples %}
+    {{ sample_block(s, 'offset') }}
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if not result.affected_samples and not result.event_only_samples %}
+<section class="card" style="margin-top:18px">
+  <h2>无任何样本变化</h2>
+  <p class="empty">两份报告的七天笔数与金额逐样本完全一致（同值重传不会产生差异）。</p>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

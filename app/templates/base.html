@@ -70,6 +70,52 @@
   .manifest { max-height:280px; overflow:auto; }
   .sticky-note { font-size:12.5px; color:var(--muted); }
   td.nw { white-space:nowrap; }
+  .muted { color:var(--muted); }
+  .small { font-size:12px; }
+  .compare-form { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; }
+  .compare-form label { display:flex; flex-direction:column; gap:6px; font-size:13px;
+                        color:var(--muted); font-weight:600; }
+  .compare-form select { font:inherit; font-size:13.5px; min-width:340px;
+                         padding:8px 10px; border:1px solid var(--line);
+                         border-radius:7px; background:#fff; color:var(--ink); }
+  .summary-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  @media (max-width:860px) { .summary-grid { grid-template-columns:repeat(2,1fr); } }
+  .summary-grid > div { border:1px solid var(--line); border-radius:8px;
+                        padding:14px; display:flex; flex-direction:column;
+                        align-items:center; gap:4px; background:#fafbfd; }
+  .summary-grid .big { font-size:26px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .summary-grid .cap { font-size:12.5px; color:var(--muted); }
+  .summary-grid .bad-num { border-color:#f2c4c4; background:var(--bad-bg); }
+  .summary-grid .bad-num .big { color:var(--bad); }
+  .summary-grid .warn-num { border-color:#ecd9a8; background:var(--warn-bg); }
+  .summary-grid .warn-num .big { color:var(--warn); }
+  .sample-block { border:1px solid var(--line); border-radius:9px; padding:14px 16px;
+                  margin:14px 0; }
+  .sample-block.affected { border-left:4px solid var(--bad); }
+  .sample-block.offset { border-left:4px solid var(--warn); background:#fffdf6; }
+  .sample-head { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+                 margin-bottom:10px; }
+  .sample-head h3 { font-size:15px; }
+  .feature-table { max-width:640px; }
+  td.delta { font-weight:700; }
+  .events-title { font-size:13.5px; margin:14px 0 6px; color:var(--ink); }
+  .event-detail { border:1px solid var(--line); border-radius:8px; padding:8px 12px;
+                  margin:8px 0; background:#fff; }
+  .event-detail summary { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+                          color:var(--ink); font-size:13.5px; }
+  .event-id { font-size:13.5px; font-weight:700; }
+  .pill.change { background:#eaf1fa; color:var(--accent); }
+  .side-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:10px; }
+  @media (max-width:980px) { .side-grid { grid-template-columns:1fr; } }
+  .side-card { border:1px solid var(--line); border-radius:8px; padding:10px;
+               background:#fafbfd; }
+  .side-card h5 { margin:0 0 8px; font-size:13px; display:flex; gap:8px;
+                  align-items:baseline; flex-wrap:wrap; }
+  .rev-table { font-size:12px; }
+  .rev-table tr.counted { background:var(--ok-bg); }
+  .rev-table tr.winner-uncounted { background:var(--warn-bg); }
+  .nav-links a { margin-left:14px; font-size:13.5px; color:#fff; }
+  header.top a { text-decoration:none; }
 </style>
 </head>
 <body>
@@ -77,6 +123,10 @@
   <div class="wrap">
     <h1>交易修订 · 审核时点特征</h1>
     <span class="sub">Point-in-time features · UTC 秒 · 截止审核时刻可见版本</span>
+    <span class="nav-links" style="margin-left:auto">
+      <a href="/">上传与报告</a>
+      <a href="/compare">报告对比 / 重训范围</a>
+    </span>
   </div>
 </header>
 <main><div class="wrap">

@@ -16,6 +16,7 @@ from . import features
 from .config import Settings
 from .csvparse import BatchRejected, parse_samples, parse_transactions
 from .db import Database
+from .diff import CompareError, build_compare, parse_published_csv, recompute_map
 
 UTC = timezone.utc
 
@@ -472,6 +473,136 @@ class AppService:
             "rows": [list(r) for r in features.iter_preview(rows, limit)],
             "total": len(rows),
         }
+
+    # ------------------------------------------------------------------ #
+    # Published-report comparison (late-revision impact analysis)
+    # ------------------------------------------------------------------ #
+    def list_ready_reports(self) -> list[dict]:
+        """Ready reports only; the comparison page offers exactly these."""
+        with self.db.read() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reports WHERE status='ready' "
+                "ORDER BY id DESC").fetchall()
+        return [{
+            "report_id": r["public_id"],
+            "status": r["status"],
+            "created_at": r["created_at"],
+            "completed_at": r["completed_at"],
+            "sample_count": r["sample_count"],
+            "txn_batch_hi": r["txn_batch_hi"],
+            "sample_batch_hi": r["sample_batch_hi"],
+        } for r in rows]
+
+    @staticmethod
+    def _same_sample_set(manifest_a: dict, manifest_b: dict) -> bool:
+        """The 'same sample batch' guard.
+
+        Two reports are comparable only when they pin the identical set of
+        sample batches, i.e. the sample high-watermark is the same number of
+        immutable batches. Batches are append-only and never rewritten, so an
+        equal high-watermark means an equal sample set.
+        """
+        return (manifest_a["sample_batch_hi"] == manifest_b["sample_batch_hi"]
+                and [b["batch_id"] for b in manifest_a["sample_batches"]]
+                == [b["batch_id"] for b in manifest_b["sample_batches"]])
+
+    def _load_published(self, public_id: str, label: str) -> tuple[dict, Path, str]:
+        """Return report metadata plus the verified published CSV path."""
+        report = self.get_report(public_id)
+        if report is None:
+            raise CompareError(f"{label}报告不存在，拒绝对比。", status=404,
+                               code="not_found")
+        if report["status"] != "ready":
+            raise CompareError(
+                f"{label}报告状态为 {report['status']}，只有已就绪（ready）"
+                "的报告才能对比，拒绝对比。")
+        found = self.report_file(public_id)
+        if found is None:
+            # report_file already flipped the row to failed on integrity loss.
+            raise CompareError(
+                f"{label}报告的发布文件缺失或摘要校验失败，下载入口已关闭，拒绝对比。")
+        path, digest = found
+        return report, path, digest
+
+    def compare_reports(self, base_id: str, candidate_id: str) -> dict:
+        """Diff two ready reports built from the same sample-batch set.
+
+        Everything is read through each report's frozen high-watermark, so a
+        batch uploaded while this request runs gets a higher batch id and
+        cannot enter either side of the comparison.
+        """
+        if not base_id or not candidate_id:
+            raise CompareError("请选择两份报告后再对比。", status=400,
+                               code="bad_request")
+        if base_id == candidate_id:
+            raise CompareError("请选择两份不同的报告进行对比。", status=400,
+                               code="bad_request")
+
+        base_meta, base_path, base_digest = self._load_published(base_id, "旧")
+        cand_meta, cand_path, cand_digest = self._load_published(candidate_id, "新")
+        base_manifest, cand_manifest = base_meta["manifest"], cand_meta["manifest"]
+
+        if not self._same_sample_set(base_manifest, cand_manifest):
+            raise CompareError(
+                "两份报告冻结的样本批次不同"
+                f"（旧报告样本高水位 #{base_manifest['sample_batch_hi']}，"
+                f"新报告样本高水位 #{cand_manifest['sample_batch_hi']}），拒绝对比。")
+        if base_manifest.get("window_seconds") != cand_manifest.get("window_seconds"):
+            raise CompareError("两份报告的窗口口径不一致，拒绝对比。")
+
+        base_csv = parse_published_csv(base_path.read_bytes(), "旧报告")
+        cand_csv = parse_published_csv(cand_path.read_bytes(), "新报告")
+
+        with self.db.read() as conn:
+            # Re-verify that the pinned source rows still match the digests
+            # frozen at report creation; tampering refuses the comparison.
+            for manifest, label in ((base_manifest, "旧报告"),
+                                    (cand_manifest, "新报告")):
+                digest_now, _, _ = features.source_digest(
+                    conn, manifest["txn_batch_hi"],
+                    manifest["sample_batch_hi"])
+                if digest_now != manifest["source_digest"]:
+                    raise CompareError(
+                        f"{label}冻结的源数据摘要与清单不符（源文件可能被篡改），拒绝对比。")
+
+            # Cross-check every published CSV feature against a fresh
+            # computation from that report's own frozen version. The UI
+            # values come from the CSV; this proves they are reproducible.
+            self._cross_check_published(
+                conn, base_meta, base_csv, base_digest, "旧报告")
+            self._cross_check_published(
+                conn, cand_meta, cand_csv, cand_digest, "新报告")
+
+            payload = build_compare(
+                conn, base_meta, cand_meta, base_csv, cand_csv)
+
+        payload["base"]["output_sha256_verified"] = base_digest
+        payload["candidate"]["output_sha256_verified"] = cand_digest
+        return payload
+
+    @staticmethod
+    def _cross_check_published(conn, meta: dict, published: dict[str, dict],
+                               output_digest: str, label: str) -> None:
+        manifest = meta["manifest"]
+        recomputed = recompute_map(
+            conn, manifest["txn_batch_hi"], manifest["sample_batch_hi"])
+        if set(recomputed) != set(published):
+            raise CompareError(
+                f"{label}发布 CSV 的样本集合与冻结版本重算结果不一致，拒绝对比。")
+        for sample_id, row in recomputed.items():
+            csv_row = published[sample_id]
+            if (row.count, row.amount_minor) != (
+                    csv_row["txn_count_7d"], csv_row["amount_minor"]):
+                raise CompareError(
+                    f"{label}样本 {sample_id} 的发布特征值"
+                    f"（{csv_row['txn_count_7d']} 笔 / {csv_row['txn_amount_7d']}）"
+                    f"与冻结版本重算值（{row.count} 笔 / {row.amount_text}）不一致，拒绝对比。")
+            if row.account_id != csv_row["account_id"] or row.audit_at != csv_row["audit_at"]:
+                raise CompareError(
+                    f"{label}样本 {sample_id} 的账户或审核时刻与冻结版本不一致，拒绝对比。")
+        if meta.get("output_sha256") != output_digest:
+            raise CompareError(
+                f"{label}发布文件 SHA-256 与数据库记录不符，拒绝对比。")
 
 
 def format_utc(epoch: int) -> str:
